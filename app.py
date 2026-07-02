@@ -303,6 +303,7 @@ textarea:focus {
 }
 
 textarea::placeholder { color: #4b5563 !important; }
+textarea, .stTextArea textarea { color: #ffffff !important; caret-color: #a78bfa !important; }
 
 div.stButton > button {
     width: 100%;
@@ -350,7 +351,7 @@ div[data-baseweb="select"] > div { background:rgba(255,255,255,0.04) !important;
 MAX_HISTORY    = 20
 TOKEN_LIMIT    = 1000000
 WARN_THRESHOLD = 0.75
-GEMINI_MODEL   = "gemini-1.5-flash"
+GEMINI_MODEL   = "gemini-2.0-flash"
 
 # API Key — safely from secrets
 try:
