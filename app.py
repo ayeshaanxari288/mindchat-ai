@@ -184,7 +184,6 @@ section[data-testid="stSidebar"] * {
 .msg-time { font-size: 10px; color: #374151; margin-top: 3px; text-align: right; }
 .ai-time  { font-size: 10px; color: #374151; margin-top: 3px; }
 
-/* Token bar */
 .token-bar-wrap {
     background: rgba(255,255,255,0.03);
     border: 1px solid rgba(255,255,255,0.06);
@@ -217,7 +216,6 @@ section[data-testid="stSidebar"] * {
     transition: width 0.5s ease;
 }
 
-/* Warning banner */
 .warning-banner {
     background: rgba(234,179,8,0.1);
     border: 1px solid rgba(234,179,8,0.3);
@@ -230,7 +228,6 @@ section[data-testid="stSidebar"] * {
     text-align: center;
 }
 
-/* Memory exam */
 .exam-box {
     background: rgba(34,197,94,0.06);
     border: 1px solid rgba(34,197,94,0.2);
@@ -350,11 +347,16 @@ div[data-baseweb="select"] > div { background:rgba(255,255,255,0.04) !important;
 """, unsafe_allow_html=True)
 
 # ── Constants ─────────────────────────────────────────
-MAX_HISTORY     = 20
-TOKEN_LIMIT     = 1000000
-WARN_THRESHOLD  = 0.75
-GEMINI_MODEL    = "gemini-1.5-flash"
-API_KEY         = st.secrets.get("GEMINI_API_KEY", "AIzaSyBt8RN6JShYe7T-CFW2jhWK_Gz1xGj8MVrQTQd7gs9hX3985gBw")
+MAX_HISTORY    = 20
+TOKEN_LIMIT    = 1000000
+WARN_THRESHOLD = 0.75
+GEMINI_MODEL   = "gemini-1.5-flash"
+
+# API Key — safely from secrets
+try:
+    API_KEY = st.secrets["GEMINI_API_KEY"]
+except:
+    API_KEY = None
 
 PERSONAS = {
     "🤖 Smart Assistant": "You are a helpful, friendly and smart AI assistant. Answer clearly and concisely.",
@@ -365,7 +367,12 @@ PERSONAS = {
     "🌟 Life Coach":      "You are a warm and motivating life coach. Help users reflect and grow positively.",
 }
 
-SUGGESTIONS = ["Tell me about yourself", "Help me write a poem", "Explain Machine Learning", "What career should I choose?"]
+SUGGESTIONS = [
+    "Tell me about yourself",
+    "Help me write a poem",
+    "Explain Machine Learning",
+    "What career should I choose?",
+]
 
 # ── Session state ─────────────────────────────────────
 if "messages"     not in st.session_state: st.session_state.messages     = []
@@ -378,44 +385,68 @@ if "show_exam"    not in st.session_state: st.session_state.show_exam    = False
 
 # ── Core functions ────────────────────────────────────
 def get_response(user_msg, history, system_prompt):
+    """
+    Artificial Memory Loop:
+    Input(Mt U Ht-1) -> Gemini API -> Response(Rt)
+    Full history sent every turn to create stateful behavior.
+    """
+    if not API_KEY:
+        return None, 0, "API key not found. Please add GEMINI_API_KEY to Streamlit Secrets."
     try:
         genai.configure(api_key=API_KEY)
         model = genai.GenerativeModel(
             model_name=GEMINI_MODEL,
             system_instruction=system_prompt,
         )
-        gemini_history = [
-            {"role": "user" if m["role"] == "user" else "model", "parts": [m["content"]]}
-            for m in history
-        ]
+
+        # Build history in Gemini format — role-content objects
+        gemini_history = []
+        for m in history:
+            role = "user" if m["role"] == "user" else "model"
+            gemini_history.append({
+                "role":  role,
+                "parts": [m["content"]]
+            })
+
+        # Start stateful chat with full history
         chat     = model.start_chat(history=gemini_history)
         response = chat.send_message(user_msg)
 
         # Token count
         tokens_used = 0
-        if hasattr(response, 'usage_metadata') and response.usage_metadata:
-            tokens_used = getattr(response.usage_metadata, 'total_token_count', 0)
+        if hasattr(response, "usage_metadata") and response.usage_metadata:
+            tokens_used = getattr(response.usage_metadata, "total_token_count", 0)
 
         return response.text, tokens_used, None
+
     except Exception as e:
         return None, 0, str(e)
 
 
 def sliding_window(msgs, limit=MAX_HISTORY):
-    """FIFO sliding window — drop oldest pairs when limit exceeded"""
+    """
+    FIFO Sliding Window Algorithm:
+    Drop oldest message pairs when limit exceeded.
+    Prevents context window overflow and token budget exhaustion.
+    """
     if len(msgs) > limit:
         excess = len(msgs) - limit
-        if excess % 2: excess += 1
+        if excess % 2:
+            excess += 1
         msgs = msgs[excess:]
     return msgs
 
 
 def export_chat():
-    """Export conversation as formatted text"""
-    lines = [f"MindChat AI — Conversation Export", f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}", "="*50, ""]
+    lines = [
+        "MindChat AI — Conversation Export",
+        f"Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
+        "=" * 50,
+        "",
+    ]
     for msg in st.session_state.messages:
         role = "You" if msg["role"] == "user" else "MindChat AI"
-        lines.append(f"[{msg.get('time','')}] {role}:")
+        lines.append(f"[{msg.get('time', '')}] {role}:")
         lines.append(msg["content"])
         lines.append("")
     return "\n".join(lines)
@@ -423,10 +454,10 @@ def export_chat():
 
 def check_memory_exam(user_msg, ai_reply):
     """
-    3-step Memory Exam from PDF:
-    Step 1: User tells name → AI acknowledges
-    Step 2: Context distraction (poem/topic)
-    Step 3: Ask name → AI recalls from history
+    3-Step Memory Exam (from PDF):
+    Step 1: State Initialization  — user tells name
+    Step 2: Context Distraction   — large volume generation
+    Step 3: State Extraction      — AI recalls name from history
     """
     msg_lower   = user_msg.lower()
     reply_lower = ai_reply.lower()
@@ -441,13 +472,15 @@ def check_memory_exam(user_msg, ai_reply):
 
     elif st.session_state.exam_step == 2:
         if "my name" in msg_lower or "what is my name" in msg_lower or "do you remember my name" in msg_lower:
-            # Check if AI remembered
             for m in st.session_state.messages:
-                if m["role"] == "user" and ("my name is" in m["content"].lower() or "call me" in m["content"].lower()):
+                if m["role"] == "user" and (
+                    "my name is" in m["content"].lower() or
+                    "call me"    in m["content"].lower()
+                ):
                     words = m["content"].lower().split()
                     for i, w in enumerate(words):
-                        if w in ["is", "me", "am"] and i+1 < len(words):
-                            name = words[i+1].strip(".,!?")
+                        if w in ["is", "me", "am"] and i + 1 < len(words):
+                            name = words[i + 1].strip(".,!?")
                             if name in reply_lower:
                                 st.session_state.exam_passed = True
                                 st.session_state.exam_step   = 3
@@ -472,7 +505,6 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
-    # Token usage bar
     st.markdown(f"""
     <div class="token-bar-wrap">
         <div class="token-bar-label">
@@ -485,7 +517,7 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
-    persona = st.selectbox("AI Persona", list(PERSONAS.keys()))
+    persona       = st.selectbox("AI Persona", list(PERSONAS.keys()))
     system_prompt = st.text_area("System Instructions", value=PERSONAS[persona], height=80)
 
     st.markdown(f"""
@@ -501,13 +533,11 @@ with st.sidebar:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # Memory exam toggle
     if st.button("🧪 Run Memory Exam"):
         st.session_state.show_exam   = not st.session_state.show_exam
         st.session_state.exam_step   = 0
         st.session_state.exam_passed = False
 
-    # Export
     if st.session_state.messages:
         st.download_button(
             label     = "💾 Export Chat",
@@ -539,11 +569,16 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+# API key missing warning
+if not API_KEY:
+    st.error("GEMINI_API_KEY not found! Please add it to Streamlit Secrets → Settings → Secrets.")
+    st.stop()
+
 # Context window overflow warning
 if token_pct >= WARN_THRESHOLD * 100:
     st.markdown(f"""
     <div class="warning-banner">
-        ⚠️ Context window is {token_pct:.0f}% full — oldest messages will be pruned by the sliding window algorithm
+        Context window is {token_pct:.0f}% full — oldest messages will be pruned by the sliding window algorithm
     </div>
     """, unsafe_allow_html=True)
 
@@ -556,8 +591,13 @@ if st.session_state.show_exam:
     step2_done = "✅" if step >= 2 else "⏳"
     step3_done = "✅" if step >= 3 else "⏳"
 
-    result_html = '<div class="exam-pass">MEMORY VERIFIED — AI Successfully Recalled!</div>' if passed else \
-                  ('<div class="exam-pass">Test in progress...</div>' if step > 0 else '<div class="exam-pending">Start chatting to begin the exam</div>')
+    result_html = (
+        '<div class="exam-pass">MEMORY VERIFIED — AI Successfully Recalled!</div>'
+        if passed else
+        '<div class="exam-pass">Test in progress...</div>'
+        if step > 0 else
+        '<div class="exam-pending">Start chatting to begin the exam</div>'
+    )
 
     st.markdown(f"""
     <div class="exam-box">
@@ -609,10 +649,10 @@ st.markdown('</div>', unsafe_allow_html=True)
 # Input
 user_input = st.text_area(
     "message",
-    placeholder = "Ask me anything — I remember our whole conversation!",
-    height      = 80,
+    placeholder      = "Ask me anything — I remember our whole conversation!",
+    height           = 80,
     label_visibility = "collapsed",
-    key         = "msg_input",
+    key              = "msg_input",
 )
 
 col1, col2 = st.columns([3, 1])
@@ -622,7 +662,6 @@ with col1:
 
 with col2:
     if st.button("🎲 Random"):
-        st.session_state.suggestion = SUGGESTIONS[st.session_state.total_turns % len(SUGGESTIONS)]
         st.rerun()
 
 if send:
@@ -631,8 +670,18 @@ if send:
         st.warning("Please type something first! Empty messages are blocked by the Structural Validation Gate.")
     else:
         now = time.strftime("%I:%M %p")
-        st.session_state.messages.append({"role": "user", "content": msg_text, "time": now})
+
+        # Step 1: Ingest & Append — add user message to history
+        st.session_state.messages.append({
+            "role":    "user",
+            "content": msg_text,
+            "time":    now,
+        })
+
+        # Step 2: Apply FIFO sliding window
         st.session_state.messages = sliding_window(st.session_state.messages)
+
+        # Step 3: Transmit & Record — send full history to Gemini
         history_so_far = st.session_state.messages[:-1]
 
         with st.spinner("MindChat is thinking..."):
@@ -642,14 +691,20 @@ if send:
             st.error(f"Error: {err}")
             st.session_state.messages.pop()
         else:
-            st.session_state.messages.append({"role": "assistant", "content": reply, "time": time.strftime("%I:%M %p")})
+            # Step 4: Append AI response to history
+            st.session_state.messages.append({
+                "role":    "assistant",
+                "content": reply,
+                "time":    time.strftime("%I:%M %p"),
+            })
             st.session_state.total_turns  += 1
             st.session_state.total_tokens += tokens
             check_memory_exam(msg_text, reply)
             st.rerun()
 
 st.markdown("""
-<div style="text-align:center; margin-top:12px; color:#1f2937; font-family:'Fredoka One',cursive; font-size:12px;">
+<div style="text-align:center; margin-top:12px; color:#1f2937;
+font-family:'Fredoka One',cursive; font-size:12px;">
     MindChat AI &nbsp;|&nbsp; Project 1 — Custom AI Chatbot with Memory &nbsp;|&nbsp; DecodeLabs 2026
 </div>
 """, unsafe_allow_html=True)
