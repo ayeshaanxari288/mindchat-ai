@@ -303,7 +303,7 @@ textarea:focus {
 }
 
 textarea::placeholder { color: #4b5563 !important; }
-textarea, .stTextArea textarea { color: #ffffff !important; caret-color: #a78bfa !important; }
+textarea, .stTextArea textarea { color: #1a1a2e !important; caret-color: #7c3aed !important; }
 
 div.stButton > button {
     width: 100%;
