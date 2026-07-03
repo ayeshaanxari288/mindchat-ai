@@ -1,7 +1,6 @@
 import streamlit as st
-import google.generativeai as genai
+import requests
 import time
-import json
 from datetime import datetime
 
 st.set_page_config(
@@ -292,9 +291,10 @@ textarea {
     background: rgba(255,255,255,0.04) !important;
     border: 1px solid rgba(124,58,237,0.3) !important;
     border-radius: 16px !important;
-    color: #e2e8f0 !important;
+    color: #1a1a2e !important;
     font-family: 'Nunito', sans-serif !important;
     font-size: 15px !important;
+    caret-color: #7c3aed !important;
 }
 
 textarea:focus {
@@ -302,8 +302,7 @@ textarea:focus {
     box-shadow: 0 0 0 3px rgba(124,58,237,0.15) !important;
 }
 
-textarea::placeholder { color: #4b5563 !important; }
-textarea, .stTextArea textarea { color: #1a1a2e !important; caret-color: #7c3aed !important; }
+textarea::placeholder { color: #6b7280 !important; }
 
 div.stButton > button {
     width: 100%;
@@ -349,13 +348,14 @@ div[data-baseweb="select"] > div { background:rgba(255,255,255,0.04) !important;
 
 # ── Constants ─────────────────────────────────────────
 MAX_HISTORY    = 20
-TOKEN_LIMIT    = 1000000
+TOKEN_LIMIT    = 6000
 WARN_THRESHOLD = 0.75
-GEMINI_MODEL   = "gemini-1.5-flash"
+MODEL_NAME     = "llama-3.1-8b-instant"
+GROQ_API_URL   = "https://api.groq.com/openai/v1/chat/completions"
 
-# API Key — safely from secrets
+# API Key from Streamlit secrets
 try:
-    API_KEY = st.secrets["GEMINI_API_KEY"]
+    API_KEY = st.secrets["GROQ_API_KEY"]
 except:
     API_KEY = None
 
@@ -388,38 +388,48 @@ if "show_exam"    not in st.session_state: st.session_state.show_exam    = False
 def get_response(user_msg, history, system_prompt):
     """
     Artificial Memory Loop:
-    Input(Mt U Ht-1) -> Gemini API -> Response(Rt)
+    Input(Mt U Ht-1) -> Groq API -> Response(Rt)
     Full history sent every turn to create stateful behavior.
     """
     if not API_KEY:
-        return None, 0, "API key not found. Please add GEMINI_API_KEY to Streamlit Secrets."
+        return None, 0, "API key not found. Add GROQ_API_KEY to Streamlit Secrets."
+
     try:
-        genai.configure(api_key=API_KEY)
-        model = genai.GenerativeModel(
-            model_name=GEMINI_MODEL,
-            system_instruction=system_prompt,
+        # Build messages array — system + full history + new message
+        messages = [{"role": "system", "content": system_prompt}]
+
+        for m in history:
+            role = "user" if m["role"] == "user" else "assistant"
+            messages.append({"role": role, "content": m["content"]})
+
+        messages.append({"role": "user", "content": user_msg})
+
+        response = requests.post(
+            GROQ_API_URL,
+            headers={
+                "Authorization": f"Bearer {API_KEY}",
+                "Content-Type":  "application/json",
+            },
+            json={
+                "model":       MODEL_NAME,
+                "messages":    messages,
+                "max_tokens":  1024,
+                "temperature": 0.7,
+            },
+            timeout=(5, 60),
         )
 
-        # Build history in Gemini format — role-content objects
-        gemini_history = []
-        for m in history:
-            role = "user" if m["role"] == "user" else "model"
-            gemini_history.append({
-                "role":  role,
-                "parts": [m["content"]]
-            })
+        if response.status_code != 200:
+            return None, 0, f"API error: HTTP {response.status_code} — {response.text[:200]}"
 
-        # Start stateful chat with full history
-        chat     = model.start_chat(history=gemini_history)
-        response = chat.send_message(user_msg)
+        data        = response.json()
+        reply       = data["choices"][0]["message"]["content"]
+        tokens_used = data.get("usage", {}).get("total_tokens", 0)
 
-        # Token count
-        tokens_used = 0
-        if hasattr(response, "usage_metadata") and response.usage_metadata:
-            tokens_used = getattr(response.usage_metadata, "total_token_count", 0)
+        return reply, tokens_used, None
 
-        return response.text, tokens_used, None
-
+    except requests.exceptions.Timeout:
+        return None, 0, "Request timed out. Please try again."
     except Exception as e:
         return None, 0, str(e)
 
@@ -455,7 +465,7 @@ def export_chat():
 
 def check_memory_exam(user_msg, ai_reply):
     """
-    3-Step Memory Exam (from PDF):
+    3-Step Memory Exam:
     Step 1: State Initialization  — user tells name
     Step 2: Context Distraction   — large volume generation
     Step 3: State Extraction      — AI recalls name from history
@@ -472,7 +482,7 @@ def check_memory_exam(user_msg, ai_reply):
             st.session_state.exam_step = 2
 
     elif st.session_state.exam_step == 2:
-        if "my name" in msg_lower or "what is my name" in msg_lower or "do you remember my name" in msg_lower:
+        if "my name" in msg_lower or "what is my name" in msg_lower or "do you remember" in msg_lower:
             for m in st.session_state.messages:
                 if m["role"] == "user" and (
                     "my name is" in m["content"].lower() or
@@ -528,7 +538,7 @@ with st.sidebar:
         <div class="memory-row"><span class="memory-key">Window Size</span><span class="memory-val">{MAX_HISTORY} messages</span></div>
         <div class="memory-row"><span class="memory-key">Stored Now</span><span class="memory-val">{len(st.session_state.messages)}</span></div>
         <div class="memory-row"><span class="memory-key">State Type</span><span class="memory-val">In-Memory Array</span></div>
-        <div class="memory-row"><span class="memory-key">Warn At</span><span class="memory-val">{int(WARN_THRESHOLD*100)}% usage</span></div>
+        <div class="memory-row"><span class="memory-key">Model</span><span class="memory-val">Llama 3.1 8B</span></div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -563,19 +573,17 @@ st.markdown("""
     <p>Custom AI Chatbot with Stateful Memory — DecodeLabs Batch 2026</p>
     <div class="header-badges">
         <span class="badge badge-purple">Memory Enabled</span>
-        <span class="badge badge-blue">Gemini 1.5 Flash</span>
+        <span class="badge badge-blue">Llama 3.1 — Groq</span>
         <span class="badge badge-pink">Sliding Window</span>
         <span class="badge badge-green">Token Tracking</span>
     </div>
 </div>
 """, unsafe_allow_html=True)
 
-# API key missing warning
 if not API_KEY:
-    st.error("GEMINI_API_KEY not found! Please add it to Streamlit Secrets → Settings → Secrets.")
+    st.error("GROQ_API_KEY not found! Please add it to Streamlit Secrets → Settings → Secrets.")
     st.stop()
 
-# Context window overflow warning
 if token_pct >= WARN_THRESHOLD * 100:
     st.markdown(f"""
     <div class="warning-banner">
@@ -583,7 +591,6 @@ if token_pct >= WARN_THRESHOLD * 100:
     </div>
     """, unsafe_allow_html=True)
 
-# Memory exam panel
 if st.session_state.show_exam:
     step   = st.session_state.exam_step
     passed = st.session_state.exam_passed
@@ -610,7 +617,6 @@ if st.session_state.show_exam:
     </div>
     """, unsafe_allow_html=True)
 
-# Chat area
 st.markdown('<div class="chat-box">', unsafe_allow_html=True)
 
 if not st.session_state.messages:
@@ -647,7 +653,6 @@ else:
 
 st.markdown('</div>', unsafe_allow_html=True)
 
-# Input
 user_input = st.text_area(
     "message",
     placeholder      = "Ask me anything — I remember our whole conversation!",
@@ -657,10 +662,8 @@ user_input = st.text_area(
 )
 
 col1, col2 = st.columns([3, 1])
-
 with col1:
     send = st.button("✨ Send Message")
-
 with col2:
     if st.button("🎲 Random"):
         st.rerun()
@@ -672,17 +675,8 @@ if send:
     else:
         now = time.strftime("%I:%M %p")
 
-        # Step 1: Ingest & Append — add user message to history
-        st.session_state.messages.append({
-            "role":    "user",
-            "content": msg_text,
-            "time":    now,
-        })
-
-        # Step 2: Apply FIFO sliding window
+        st.session_state.messages.append({"role": "user", "content": msg_text, "time": now})
         st.session_state.messages = sliding_window(st.session_state.messages)
-
-        # Step 3: Transmit & Record — send full history to Gemini
         history_so_far = st.session_state.messages[:-1]
 
         with st.spinner("MindChat is thinking..."):
@@ -692,12 +686,7 @@ if send:
             st.error(f"Error: {err}")
             st.session_state.messages.pop()
         else:
-            # Step 4: Append AI response to history
-            st.session_state.messages.append({
-                "role":    "assistant",
-                "content": reply,
-                "time":    time.strftime("%I:%M %p"),
-            })
+            st.session_state.messages.append({"role": "assistant", "content": reply, "time": time.strftime("%I:%M %p")})
             st.session_state.total_turns  += 1
             st.session_state.total_tokens += tokens
             check_memory_exam(msg_text, reply)
